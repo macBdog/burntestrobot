@@ -1,29 +1,36 @@
 #include <LiquidCrystal.h>
 
-const int ledPin = 13;
-const int dirPin = 2;
-const int stepPin = 3;
+// Which pins are connected to the inputs. First four are digital outputs, the rest analog inputs
+#define PIN_CARRIAGE_DIR    2
+#define PIN_CARRIAGE_STEP   3
+#define PIN_SAMPLE_MOTOR1   4
+#define PIN_SAMPLE_MOTOR2   5
+#define PIN_CARRIAGE_UP     A1
+#define PIN_CARRIAGE_DOWN   A2
+#define PIN_SAMPLE_OUT      A3
+#define PIN_SAMPLE_IN       A4
+#define PIN_HYSTERSIS       100
 
 // State keeps track of what the machine is doing
-// 0 Startup
-// 1 Reset motors until both the stops are hit
-// 2 Wait for keypress
-// 3 Sample insert
-// 4 Carriage descent
-// 5 Timing
-// 6 Carriage ascent
-// 7 Sample return
+#define STATE_STARTUP       0 // Fresh boot or reset
+#define STATE_RESET         1 // Reset motors until both the stops are hit
+#define STATE_WAIT          2 // Wait for keypress
+#define STATE_SAMPLE_IN     3 // Sample insert
+#define STATE_CARRIAGE_DOWN 4 // Carriage descent
+#define STATE_TESTTIME      5 // Timing
+#define STATE_CARRIAGE_UP   6 // Carriage ascent
+#define STATE_SAMPLE_OUT    7 // Sample return
 
 byte state = 0;
 int timer = 0;
 int testTime = 1000;
-int sampleMoveSpeed = 200;
-int carriageMoveSpeed = 200;
 
-int dir = false;
-int dirCount = 0;
-int dirLimit = 1000;
-bool touching = false;
+int sampleMoveSpeed = 200;
+byte sampleDirIn = false;
+
+int carriageMoveSpeed = 500;
+byte carriageDirUp = false;
+
 LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 
 // ADC readings expected for the 5 buttons on the ADC input
@@ -34,14 +41,13 @@ LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 #define SELECT_10BIT_ADC        741  // right
 #define BUTTONHYSTERESIS         145  // hysteresis for valid button sensing window
 
-//return values for ReadButtons()
 #define BUTTON_ADC_PIN           A0  // A0 is the button ADC input
-#define BUTTON_NONE               0  // 
-#define BUTTON_RIGHT              1  // 
-#define BUTTON_UP                 2  // 
-#define BUTTON_DOWN               3  // 
-#define BUTTON_LEFT               4  // 
-#define BUTTON_SELECT             5  // 
+#define BUTTON_NONE               0  
+#define BUTTON_TIME_INC           1  // Add 100ms onto the test time
+#define BUTTON_TIME_DEC           2  // Remove 100ms from the test time
+#define BUTTON_UNUSED2            3  // 
+#define BUTTON_BEGIN              4  // Start the test where possible
+#define BUTTON_UNUSED3            5  // 
 
 byte buttonJustPressed  = false;         //this will be true after a ReadButtons() call if triggered
 byte buttonJustReleased = false;         //this will be true after a ReadButtons() call if triggered
@@ -49,9 +55,9 @@ byte buttonWas          = BUTTON_NONE;   //used by ReadButtons() for detection o
 
 void setup() 
 {
-  pinMode(dirPin, OUTPUT);
+  pinMode(PIN_DIR, OUTPUT);
   pinMode(stepPin, OUTPUT);
-  digitalWrite(dirPin, LOW);
+  digitalWrite(PIN_DIR, LOW);
   digitalWrite(stepPin, LOW);
   lcd.begin(16, 2);
   PrintState();
@@ -98,57 +104,56 @@ void ButtonLoop()
     lcd.print("ms");
   }
    
-  //show text label for the button pressed
-  switch( button )
+  switch (button)
   {
-    case BUTTON_NONE:
+    case BUTTON_TIME_INC:
     {
-       break;
-    }
-    case BUTTON_RIGHT:
-    {
-      if (buttonJustPressed)
+      if (state <= STATE_WAIT)
       {
-        testTime = testTime + 100;
-        if (testTime < 100)
+        if (buttonJustPressed)
         {
-          testTime = 100;
-        }
-        if (testTime > 9000)
-        {
-          testTime = 9000;
+          testTime = testTime + 100;
+          if (testTime < 100)
+          {
+            testTime = 100;
+          }
+          if (testTime > 9000)
+          {
+            testTime = 9000;
+          }
         }
       }
       break;
     }
-    case BUTTON_UP:
+    case BUTTON_TIME_DEC:
     {
-      if (buttonJustPressed)
+      if (state <= STATE_WAIT)
       {
-        testTime = testTime - 100;
-        if (testTime < 100)
+        if (buttonJustPressed)
         {
-          testTime = 100;
-        }
-        if (testTime > 9000)
-        {
-          testTime = 9000;
+          testTime = testTime - 100;
+          if (testTime < 100)
+          {
+            testTime = 100;
+          }
+          if (testTime > 9000)
+          {
+            testTime = 9000;
+          }
         }
       }
       break;
     }
-    case BUTTON_DOWN:
+    case BUTTON_BEGIN:
     {
-      break;
-    }
-    case BUTTON_LEFT:
-    {
-      // If we are waiting for keypress then move to testing
+      // If we are waiting for keypress then start testing
       if (buttonJustPressed)
       {
-        if (state == 2)
+        if (state == STATE_WAIT)
         {
-          state = 3;
+          timer = testTime;
+          state = STATE_SAMPLE_IN;
+          digitalWrite(PIN_SAMPLE_IN, HIGH);
           PrintState();
         }
       }
@@ -175,37 +180,161 @@ void ButtonLoop()
   }
 }
 
-void SampleLoop()
+void SampleMove(boolean moveDirectionIn)
 {
-
-}
-
-void CarriageLoop()
-{ 
-  int inSpeed = 500;
-  
-  if (dirCount >= dirLimit)
+  if (moveDirectionIn)
   {
-    dirCount = 0;
-    dir = !dir;
-  }
-  
-  if (dir)
-  { 
-    digitalWrite(dirPin, HIGH); 
+    digitalWrite(PIN_SAMPLE_MOTOR1, HIGH); 
+    digitalWrite(PIN_SAMPLE_MOTOR2, LOW); 
   }
   else
   {
-    digitalWrite(dirPin, LOW);
+    digitalWrite(PIN_SAMPLE_MOTOR1, LOW); 
+    digitalWrite(PIN_SAMPLE_MOTOR2, HIGH); 
+  }
+}
+
+void CarriageMove(boolean moveDirectionDown)
+{ 
+  if (moveDirectionUp)
+  { 
+    digitalWrite(PIN_CARRIAGE_DIR, HIGH); 
+  }
+  else
+  {
+    digitalWrite(PIN_CARRIAGE_DIR, LOW);
   }
 
-  digitalWrite(stepPin, HIGH);
-  delayMicroseconds(inSpeed);
+  digitalWrite(PIN_CARRIAGE_STEP, HIGH);
+  delayMicroseconds(carriageMoveSpeed);
 
-  digitalWrite(stepPin, LOW);
-  delayMicroseconds(inSpeed);
-    
-  dirCount++;
+  digitalWrite(PIN_CARRIAGE_STEP, LOW);
+  delayMicroseconds(carriageMoveSpeed);
+}
+
+void HandleState()
+{
+  switch (state)
+  {
+    case STATE_STARTUP:
+    {
+      // Turn off all motors
+      timer = 0;
+      digitalWrite(PIN_SAMPLE_MOTOR1, LOW); 
+      digitalWrite(PIN_SAMPLE_MOTOR2, LOW); 
+      digitalWrite(PIN_CARRIAGE_DIR, LOW);
+      digitalWrite(PIN_CARRIAGE_STEP, LOW);
+
+      state = STATE_RESET;
+      PrintState();
+      break;
+    }
+    case STATE_RESET:     
+    {
+      // Read end stops for both motors
+      unsigned int sampleVoltage = analogRead(PIN_SAMPLE_OUT);
+      unsigned int carriageVoltage = analogRead(PIN_CARRIAGE_UP);
+
+      // Move sample out until stop hit
+      if (sampleVoltage <= PIN_HYSTERSIS)
+      {
+        SampleMove(false);
+      }
+
+      // Move carriage up until stop hit
+      if (carriageVoltage <= PIN_HYSTERSIS)
+      {
+        CarriageMove(false);
+      }
+
+      // Wait till both motors are safe before proceeding
+      if (sampleVoltage > PIN_HYSTERSIS && carriageVoltage > PIN_HYSTERSIS)
+      {
+        digitalWrite(PIN_SAMPLE_MOTOR1, LOW); 
+        digitalWrite(PIN_SAMPLE_MOTOR2, LOW); 
+
+        state = STATE_WAIT;
+        PrintState();
+      }
+      break;
+    }
+    case STATE_WAIT:
+    {
+      break;
+    }
+    case STATE_SAMPLE_IN:
+    {
+      // Move sample in, read end stop and proceed
+      SampleMove(true);
+      unsigned int sampleVoltage = analogRead(PIN_SAMPLE_IN);
+      if (sampleVoltage > PIN_HYSTERSIS)
+      {
+        digitalWrite(PIN_SAMPLE_MOTOR1, LOW); 
+        digitalWrite(PIN_SAMPLE_MOTOR2, LOW); 
+
+        state = STATE_CARRIAGE_DOWN;
+        PrintState();
+        digitalWrite(PIN_SAMPLE_IN, LOW);
+      }
+      break;
+    }
+    case STATE_CARRIAGE_DOWN:
+    {
+      // Move carriage down, read end stop and proceed
+      CarriageMove(true);
+      unsigned int carriageVoltage = analogRead(PIN_CARRIAGE_DOWN);
+      if (carriageVoltage > PIN_HYSTERSIS)
+      {
+        timer = testTime;
+        state = STATE_TESTTIME;
+        PrintState();
+      }
+      break;
+    }
+    case STATE_TESTTIME:
+    {
+      // Wait till test is complete
+      if (timer > 0)
+      {
+        sleep(10);
+        timer = timer - 10;
+      }
+      else
+      {
+        state = STATE_CARRIAGE_UP;
+        PrintState();
+        break;
+      }
+      break;
+    } 
+    case STATE_CARRIAGE_UP:
+    {
+      // Move carriage down, read end stop and proceed
+      CarriageMove(false);
+      unsigned int carriageVoltage = analogRead(PIN_CARRIAGE_UP);
+      if (carriageVoltage > PIN_HYSTERSIS)
+      {
+        state = STATE_SAMPLE_OUT;
+        PrintState();
+      }
+      break;
+    }
+    case STATE_SAMPLE_OUT:
+    {
+      // Move sample out, read end stop and proceed to reset
+      SampleMove(false);
+      unsigned int sampleVoltage = analogRead(PIN_SAMPLE_OUT);
+      if (sampleVoltage > PIN_HYSTERSIS)
+      {
+        digitalWrite(PIN_SAMPLE_MOTOR1, LOW); 
+        digitalWrite(PIN_SAMPLE_MOTOR2, LOW); 
+        state = STATE_RESET;
+        PrintState();
+        break;
+      }
+    }
+    default: break;
+  }
 }
 
 void PrintState()
@@ -213,14 +342,14 @@ void PrintState()
   lcd.setCursor(0, 0);
   switch (state)
   {
-    case 0: lcd.print("Please wait... "); break;
-    case 1: lcd.print("Please wait... "); break;
-    case 2: lcd.print("Ready          "); break;
-    case 3: lcd.print("Sample IN      "); break;
-    case 4: lcd.print("Carriage DOWN  "); break;
-    case 5: lcd.print("Test           "); break;
-    case 6: lcd.print("Carriage UP    "); break;
-    case 7: lcd.print("Sample OUT      "); break;
+    case STATE_STARTUP      : lcd.print("Please wait...  "); break;
+    case STATE_RESET        : lcd.print("Please wait...  "); break;
+    case STATE_WAIT         : lcd.print("Ready           "); break;
+    case STATE_SAMPLE_IN    : lcd.print("Sample IN       "); break;
+    case STATE_CARRIAGE_DOWN: lcd.print("Carriage DOWN   "); break;
+    case STATE_TESTTIME     : lcd.print("Testing         "); break;
+    case STATE_CARRIAGE_UP  : lcd.print("Carriage UP     "); break;
+    case STATE_SAMPLE_OUT   : lcd.print("Sample OUT      "); break;
     default: break;
   }
 }
@@ -236,27 +365,27 @@ byte ReadButtons()
    //sense if the voltage falls within valid voltage windows
    if( buttonVoltage < ( RIGHT_10BIT_ADC + BUTTONHYSTERESIS ) )
    {
-      button = BUTTON_RIGHT;
+      button = BUTTON_TIME_INC;
    }
    else if(   buttonVoltage >= ( UP_10BIT_ADC - BUTTONHYSTERESIS )
            && buttonVoltage <= ( UP_10BIT_ADC + BUTTONHYSTERESIS ) )
    {
-      button = BUTTON_UP;
+      button = BUTTON_TIME_DEC;
    }
    else if(   buttonVoltage >= ( DOWN_10BIT_ADC - BUTTONHYSTERESIS )
            && buttonVoltage <= ( DOWN_10BIT_ADC + BUTTONHYSTERESIS ) )
    {
-      button = BUTTON_DOWN;
+      button = BUTTON_UNUSED2;
    }
    else if(   buttonVoltage >= ( LEFT_10BIT_ADC - BUTTONHYSTERESIS )
            && buttonVoltage <= ( LEFT_10BIT_ADC + BUTTONHYSTERESIS ) )
    {
-      button = BUTTON_LEFT;
+      button = BUTTON_BEGIN;
    }
    else if(   buttonVoltage >= ( SELECT_10BIT_ADC - BUTTONHYSTERESIS )
            && buttonVoltage <= ( SELECT_10BIT_ADC + BUTTONHYSTERESIS ) )
    {
-      button = BUTTON_SELECT;
+      button = BUTTON_UNUSED3;
    }
    //handle button flags for just pressed and just released events
    if( ( buttonWas == BUTTON_NONE ) && ( button != BUTTON_NONE ) )
