@@ -55,10 +55,14 @@ byte buttonWas          = BUTTON_NONE;   //used by ReadButtons() for detection o
 
 void setup() 
 {
-  pinMode(PIN_DIR, OUTPUT);
-  pinMode(stepPin, OUTPUT);
-  digitalWrite(PIN_DIR, LOW);
-  digitalWrite(stepPin, LOW);
+  pinMode(PIN_CARRIAGE_DIR, OUTPUT);
+  pinMode(PIN_CARRIAGE_STEP, OUTPUT);
+  pinMode(PIN_SAMPLE_MOTOR1, OUTPUT);
+  pinMode(PIN_SAMPLE_MOTOR2, OUTPUT);
+  digitalWrite(PIN_CARRIAGE_DIR, LOW);
+  digitalWrite(PIN_CARRIAGE_STEP, LOW);
+  digitalWrite(PIN_SAMPLE_MOTOR1, LOW);
+  digitalWrite(PIN_SAMPLE_MOTOR2, LOW);
   lcd.begin(16, 2);
   PrintState();
   lcd.setCursor(0, 1);
@@ -71,8 +75,7 @@ void setup()
 void loop() 
 {
   ButtonLoop();
-  SampleLoop();
-  CarriageLoop();
+  HandleState();
 }
 
 void ButtonLoop()
@@ -159,10 +162,6 @@ void ButtonLoop()
       }
       break;
     }
-    case BUTTON_SELECT:
-    {
-      break;
-    }
     default:
     {
       break;
@@ -196,7 +195,7 @@ void SampleMove(boolean moveDirectionIn)
 
 void CarriageMove(boolean moveDirectionDown)
 { 
-  if (moveDirectionUp)
+  if (moveDirectionDown)
   { 
     digitalWrite(PIN_CARRIAGE_DIR, HIGH); 
   }
@@ -296,8 +295,8 @@ void HandleState()
       // Wait till test is complete
       if (timer > 0)
       {
-        sleep(10);
         timer = timer - 10;
+        return;
       }
       else
       {
